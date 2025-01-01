@@ -1,0 +1,87 @@
+commit 738d01b0b98b5822f9c466745724d2b1507593f0
+Author: D.J <dingjun@sz-duowei.com>
+Date:   Tue Dec 24 15:20:49 2024 +0800
+
+    [dl01]: 给/sys/devices/platform/11008000.i2c1/i2c-1/1-0068/kthReg节点添加selinux权限
+
+diff --git a/alps/device/mediatek/mt6761/init.mt6761.rc b/alps/device/mediatek/mt6761/init.mt6761.rc
+old mode 100644
+new mode 100755
+index fc57d559dd5..29e303e0dd3
+--- a/alps/device/mediatek/mt6761/init.mt6761.rc
++++ b/alps/device/mediatek/mt6761/init.mt6761.rc
+@@ -69,6 +69,8 @@ on init
+ # update bg rt_runtime 100ms
+     write /dev/cpuctl/bg_non_interactive/cpu.rt_runtime_us 100000
+ 
++	chmod 0666 /sys/devices/platform/11008000.i2c1/i2c-1/1-0068/kthReg
++
+ on late-init
+     write /proc/bootprof "INIT:late-init"
+ 
+diff --git a/alps/device/mediatek/sepolicy/basic/non_plat/file.te b/alps/device/mediatek/sepolicy/basic/non_plat/file.te
+old mode 100644
+new mode 100755
+index 967548a627b..e14fc9abe25
+--- a/alps/device/mediatek/sepolicy/basic/non_plat/file.te
++++ b/alps/device/mediatek/sepolicy/basic/non_plat/file.te
+@@ -674,3 +674,6 @@ type proc_mgq, fs_type, proc_type;
+ 
+ # For chager enable fast charging algorithm
+ type sysfs_fs_chg_file, fs_type, sysfs_type;
++
++# For magencoder 2024/12/24
++type sysfs_kthreg, fs_type, sysfs_type;
+diff --git a/alps/device/mediatek/sepolicy/basic/non_plat/genfs_contexts b/alps/device/mediatek/sepolicy/basic/non_plat/genfs_contexts
+old mode 100644
+new mode 100755
+index 94abfb9cea8..feeb7cbe01d
+--- a/alps/device/mediatek/sepolicy/basic/non_plat/genfs_contexts
++++ b/alps/device/mediatek/sepolicy/basic/non_plat/genfs_contexts
+@@ -892,3 +892,6 @@ genfscon sysfs /devices/platform/11f10000.efuse/mtk-devinfo0/nvmem
+ 
+ # For chager enable fast charging algorithm
+ genfscon sysfs /devices/platform/charger/fast_chg_indicator   u:object_r:sysfs_fs_chg_file:s0
++
++# For magencoder 2024/12/24
++genfscon sysfs /devices/platform/11008000.i2c1/i2c-1/1-0068/kthReg                              u:object_r:sysfs_kthreg:s0
+\ No newline at end of file
+diff --git a/alps/device/mediatek/sepolicy/basic/non_plat/system_app.te b/alps/device/mediatek/sepolicy/basic/non_plat/system_app.te
+old mode 100644
+new mode 100755
+index 80250454f9b..289ba6803d9
+--- a/alps/device/mediatek/sepolicy/basic/non_plat/system_app.te
++++ b/alps/device/mediatek/sepolicy/basic/non_plat/system_app.te
+@@ -42,3 +42,6 @@ allowxperm system_app proc_mtk_jpeg:file ioctl {
+ # Purpose: Allow system app to access mtk fpsgo
+ allow system_app sysfs_fpsgo:dir search;
+ allow system_app sysfs_fpsgo:file r_file_perms;
++
++# For magencoder 2024/12/24
++allow system_app sysfs_kthreg:file { open read getattr };
+diff --git a/alps/device/mediatek/sepolicy/basic/non_plat/untrusted_app.te b/alps/device/mediatek/sepolicy/basic/non_plat/untrusted_app.te
+old mode 100644
+new mode 100755
+index a611d3bc386..1e6d2347937
+--- a/alps/device/mediatek/sepolicy/basic/non_plat/untrusted_app.te
++++ b/alps/device/mediatek/sepolicy/basic/non_plat/untrusted_app.te
+@@ -8,3 +8,6 @@
+ #					 from MTK kernel modules for thermal tests at OEM/ODM.
+ allow untrusted_app proc_mtktz:dir search;
+ allow untrusted_app proc_mtktz:file r_file_perms;
++
++# For magencoder 2024/12/24
++allow untrusted_app sysfs_kthreg:file { open read getattr };
+diff --git a/alps/kernel-4.19/drivers/misc/mediatek/magencoder/kth5701/kth5701.c b/alps/kernel-4.19/drivers/misc/mediatek/magencoder/kth5701/kth5701.c
+index 88a0c760465..40333f5d2ce 100755
+--- a/alps/kernel-4.19/drivers/misc/mediatek/magencoder/kth5701/kth5701.c
++++ b/alps/kernel-4.19/drivers/misc/mediatek/magencoder/kth5701/kth5701.c
+@@ -251,7 +251,7 @@ static int kth5701_get_chip_ID(struct kth5701 *kth5701) {
+ 				RegisterData[0], RegisterData[1], RegisterData[2]);
+ 			return 0;
+ 		} else {
+-			pr_info("ERROR: RegisterData: 0X%02X, 0X%02X, 0X%02X\n", RegisterData[0], RegisterData[1], RegisterData[2]);
++			pr_err("ERROR: RegisterData: 0X%02X, 0X%02X, 0X%02X\n", RegisterData[0], RegisterData[1], RegisterData[2]);
+ 		}
+ 		msleep(AW_READ_CHIPID_RETRY_DELAY);
+ 	}

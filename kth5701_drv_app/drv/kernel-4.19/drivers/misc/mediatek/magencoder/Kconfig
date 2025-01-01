@@ -1,0 +1,6 @@
+config DW_MAGNETICENCODER_KTH5701
+	bool "Magnetic encoder kth5701 IC"
+	default n
+	help
+	  Magnetic Encoder
+	  vendor type kth5701
