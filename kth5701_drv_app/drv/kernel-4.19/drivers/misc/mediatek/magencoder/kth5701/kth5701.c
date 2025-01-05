@@ -15,6 +15,7 @@
  ************************************************************************
  *
  *	[Create by Dingjun 2024.12.10]
+ *	[modify by Dingjun 2025.01.04]
  *
  *************************************************************************
  */
@@ -40,8 +41,6 @@
 
 #include "KTH57XXIIC.h"
 
-#define USE_KTH5701_THREAD (0)
-
 /* USER CODE BEGIN PV */
 uint8_t RegisterData[3]={0};//存放读取寄存器时返回的值 RegisterData[0]：status RegisterData[1]：寄存器高八位 RegisterData[2]：寄存器低八位
 uint8_t DataReadFrame[9]={0};//存放测量结束读回的数据
@@ -61,6 +60,9 @@ int16_t x_max,x_min,y_max,y_min;
 
 /*static*/ struct kth5701* gp_Kth5701 = NULL;
 
+static KTH5701_WORK_MODE s_WorkMode = WAKEUP_SLEEP_MODE;
+
+static enum hall_state s_hall_state = HIG_LEVEL;
 
 //测量数据回读帧（data read frame）
 extern uint8_t KTH57XXDataRead(uint8_t axis);
@@ -150,31 +152,39 @@ void KTH5701_IIC_Out(void)
 }
 
 
-#if 0
-/**
-  * @brief  读取寄存器数据
-  *         寄存器中的值以及芯片工作状态存放在RegisterData数组中
-  * @param  Register：寄存器
-  * @retval IIC是否通信成功
-  */
-void KTH57XXReadRegister(uint8_t Register)
+static void hall_detect_eint_work_callback(struct work_struct *work)
+{
+	if (s_hall_state == LOW_LEVEL) {
+		s_hall_state = HIG_LEVEL;
+		pr_info("%s,%d-[hall eint detect HIG_LEVEL ]\n", __func__, __LINE__);
+
+		//msleep(100);
+
+		irq_set_irq_type(gp_Kth5701->hall_eint, IRQF_TRIGGER_HIGH);
+		enable_irq(gp_Kth5701->hall_eint);
+
+	} else {
+		s_hall_state = LOW_LEVEL;
+		pr_info("%s,%d-[hall eint detect LOW_LEVEL ]\n", __func__, __LINE__);
+
+		//msleep(100);
+
+		irq_set_irq_type(gp_Kth5701->hall_eint, IRQF_TRIGGER_LOW);
+		enable_irq(gp_Kth5701->hall_eint);
+	}
+}
+
+
+static irqreturn_t halleint_detect_eint_isr(int irq, void *data)
 {
 
-	uint8_t registerName;
-	uint8_t com[2];
-	uint8_t writeLen, readLen;
+	pr_info("%s,%d-irq=%d", __func__, __LINE__, irq);
+	disable_irq_nosync(irq);
+	schedule_delayed_work(&gp_Kth5701->halleint_delaywork,
+		msecs_to_jiffies(gp_Kth5701->halleint_swdebounce));
 
-	registerName = Register <<2 ; //读取时寄存器要左移两位
-	com[0] = READ_REGISTER;
-	com[1] = registerName;
-	writeLen = 2;
-	readLen = 3;
-
-	i2c_master_send(gp_Kth5701->i2c, com, writeLen);
-    i2c_master_recv(gp_Kth5701->i2c, RegisterData, readLen);
-
+	return IRQ_HANDLED;
 }
-#endif
 
 
 /*****************************************************
@@ -185,6 +195,8 @@ void KTH57XXReadRegister(uint8_t Register)
 static int kth5701_parse_dt(struct device *dev, struct kth5701 *kth5701,
 			    struct device_node *np)
 {
+	int ret=0;
+	u32 ints[2] = {0};
 
 	kth5701->enable_gpio = of_get_named_gpio(np, "enable-gpio", 0);
 	if (kth5701->enable_gpio < 0) {
@@ -195,6 +207,40 @@ static int kth5701_parse_dt(struct device *dev, struct kth5701 *kth5701,
 	} else {
 		dev_info(dev, "%s: enable gpio provided ok\n", __func__);
 	}
+
+
+	kth5701->hall_eint_gpio = of_get_named_gpio(np, "hall-eint", 0);
+	ret = gpio_request(kth5701->hall_eint_gpio, "hall-eint control pin");
+	printk("%s,%d ret=%d\n", __func__, __LINE__, ret);
+	if (ret<0)
+		pr_err("hall_eint_gpio pin, failure of setting\n");
+
+
+	kth5701->hall_eint = gpio_to_irq(kth5701->hall_eint_gpio);
+	if (!kth5701->hall_eint)
+	{
+		printk("kth5701->hall_eint irq_of_parse_and_map(..) fail\n");
+		ret = -EINVAL;
+		return ret;
+	}
+
+	pr_info("%s,%d-request handler for hall_eint ID IRQ: %d\n",__func__, __LINE__, kth5701->hall_eint);
+	ret = request_irq(kth5701->hall_eint, halleint_detect_eint_isr, IRQ_TYPE_LEVEL_LOW, "KTH5701-hall-eint", kth5701);
+	if (ret) {
+	    pr_err("kth5701->hall_eint irq thread request failed, ret=%d\n", ret);
+	    return -3;
+    }
+
+	enable_irq_wake(kth5701->hall_eint);
+
+	ret = of_property_read_u32_array(np, "halleint-debounce",
+		ints, ARRAY_SIZE(ints));
+	if (!ret)
+		kth5701->halleint_hwdebounce = ints[1];
+
+	kth5701->halleint_swdebounce = msecs_to_jiffies(10);
+
+	INIT_DELAYED_WORK(&kth5701->halleint_delaywork, hall_detect_eint_work_callback);
 
 #ifdef _GPIO_IIC_
 	kth5701->i2csck_gpio = of_get_named_gpio(np, "i2csck-gpio", 0);
@@ -220,7 +266,6 @@ static int kth5701_parse_dt(struct device *dev, struct kth5701 *kth5701,
 
 	return 0;
 }
-
 
 
 /*****************************************************
@@ -258,163 +303,52 @@ static int kth5701_get_chip_ID(struct kth5701 *kth5701) {
 	return -EINVAL;
 }
 
-#if USE_KTH5701_THREAD
-/** 泰勒展开式求 arctan 的值
-	x: 反三角函数输入值
-	terms: 泰勒展开级数
- */
-static double arctan_taylor(double x, int terms) {
-    double result = 0.0;
-    double term = x; // 当前项值
-    int n;
 
-    for (n = 0; n < terms; n++) {
-        if (n > 0) {
-            term *= -x * x; // 更新当前项的幂次和符号
-        }
-        result += term / (2 * n + 1); // 加入当前项
-    }
-
-    return result;
-}
-#endif
-
-
-#if USE_KTH5701_THREAD /*将此部分移动到hardware层去实现*/
-static int kth5701_sense_thread(void *data)
+static ssize_t kth5701_show_work_mode(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	/* Infinite loop */
-	/* USER CODE BEGIN WHILE */
-    while (!kthread_should_stop()) {
-        pr_info("kth5701_sense_thread is running...\n");
-
-
-	    /*第三步：开启离轴模式*/
-		if(strcmp(buf,"start")==0)
-		{
-
-			/*采样点采样*/
-			if(calib_sample_flag == 0)
-			{
-				KTH57XXDataRead(0X0f);
-
-				x = ( DataReadFrame[3] << 8) + DataReadFrame[4] - 0x7fff;
-				y = ( DataReadFrame[5] << 8) + DataReadFrame[6] - 0x7fff;
-
-				//angle = atan2(y,x)*57.3 + 180; //kernel里面没有找个数学库，使用泰勒级数进行展开求解;
-				angle = arctan_taylor(y/x, 10)*57.3 + 180;
-
-				if(get_sample == 0)
-				{
-					pr_info("开始离轴校准，请缓慢旋转磁铁。\n");
-					x_max = x;
-					x_min = x;
-					y_max = y;
-					y_min = y;
-
-					ang_get_l = angle/10;
-					ang_get_h = ang_get_l + 1;
-
-					get_sample++;
-					pr_info("已采样%d个点\n",get_sample);
-				}
-				else if(get_sample < 36)
-				{
-					if (ang_get_l == 0)
-						ang_get_l = 36;
-					if (ang_get_h == 36)
-						ang_get_h = 0;
-
-					angle = angle/10;
-					if((uint8_t)angle == ang_get_l -1)
-					{
-						if(x_max < x)
-						{
-							x_max = x;
-						}
-						if(x_min > x)
-						{
-							x_min = x;
-						}
-
-						if(y_max < y)
-						{
-							y_max = y;
-						}
-						if(y_min > y)
-						{
-							y_min = y;
-						}
-						ang_get_l--;
-						get_sample++;
-						pr_info("已采样%d个点\n",get_sample);
-					}
-					else if((uint8_t)angle == ang_get_h)
-					{
-						if(x_max < x)
-						{
-							x_max = x;
-						}
-						if(x_min > x)
-						{
-							x_min = x;
-						}
-
-						if(y_max < y)
-						{
-							y_max = y;
-						}
-						if(y_min > y)
-						{
-							y_min = y;
-						}
-						ang_get_h++;
-						get_sample++;
-						pr_info("已采样%d个点\n",get_sample);
-					}
-				}
-				else if(get_sample == 36)
-				{
-						x_max = (x_max - x_min)/2;
-						y_max = (y_max - y_min)/2;
-
-						calib_sample_flag = 1;
-						pr_info("离轴校准结束\n");
-				}
-			}
-			else//离轴校准完成后输出校准前后角度
-			{
-				KTH57XXDataRead(0X0f);
-				x = ( DataReadFrame[3] << 8) + DataReadFrame[4] - 0x7fff;
-				y = ( DataReadFrame[5] << 8) + DataReadFrame[6] - 0x7fff;
-
-				//angle = atan2(y,x)*57.3 + 180;
-				angle = arctan_taylor(y/x, 10)*57.3 + 180;
-
-				xTemp = (float)x/x_max;
-				yTemp = (float)y/y_max;
-				calib_angle = arctan_taylor(yTemp/xTemp, 10)*57.3 + 180;
-				//calib_angle = atan2((float)y/y_max, (float)x/x_max)*57.3 + 180;
-
-				pr_info("较准前角度:%0.1f,校准后角度:%0.1f \n",angle,calib_angle);
-			}
-		}
-		else
-		{
-			pr_info("请发送'start'开始离轴校准 \n");
-			//scanf("%s",buf);
-		}
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-        msleep(10); // Sleep for 10 ms
-    }
-    pr_info("Kernel thread stopping\n");
-    return 0;
+    return sprintf(buf, "Work mode: %d\n", s_WorkMode);
 }
-#endif
+
+static ssize_t kth5701_store_work_mode(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	s_WorkMode = (KTH5701_WORK_MODE)simple_strtol(buf, NULL, 10);
+	switch( s_WorkMode )
+	{
+		case WAKEUP_SLEEP_MODE:
+			KTH57XXWakeupSleep(0x0f);
+			pr_info("WAKEUP_SLEEP_MODE\n");
+			break;
+
+		case CONTINUOUS_SENSING_MODE:
+			KTH57XXContinuousSensing(0x0f);
+			pr_info("CONTINUOUS_SENSING_MODE\n");
+			break;
+
+		case SINGLE_CONVERSION_MODE:
+			KTH57XXSingleConversion(0x0f);
+			pr_info("SINGLE_CONVERSION_MODE\n");
+			break;
+
+		case IDLE_MODE:
+			KTH57XXIdle();
+			pr_info("IDLE_MODE\n");
+			break;
+
+		case RESET_MODE:
+			//KTH57XXReset(); /* 不要轻易使用 reset*/
+			pr_info("RESET_MODE\n");
+			break;
+
+		default:
+			KTH57XXWakeupSleep(0x0f);
+			pr_info("default\n");
+			break;
+	}
+    return count;
+}
 
 
+static DEVICE_ATTR(workmode, 0664, kth5701_show_work_mode, kth5701_store_work_mode);
 
 
 static ssize_t kth5701_show_register(struct device *dev, struct device_attribute *attr, char *buf)
@@ -463,6 +397,8 @@ static int kth5701_i2c_probe(struct i2c_client *i2c,
 
 	i2c_set_clientdata(i2c, kth5701);
 
+	gp_Kth5701 = kth5701;
+
 	/* kth5701 enable pin */
 	if (np) {
 		ret = kth5701_parse_dt(&i2c->dev, kth5701, np);
@@ -474,6 +410,7 @@ static int kth5701_i2c_probe(struct i2c_client *i2c,
 		}
 	} else {
 		kth5701->enable_gpio = -1;
+		kth5701->hall_eint_gpio = -1;
 	#ifdef _GPIO_IIC_
 		kth5701->i2csck_gpio = -1;
 		kth5701->i2csda_gpio = -1;
@@ -489,6 +426,7 @@ static int kth5701_i2c_probe(struct i2c_client *i2c,
 			goto err_gpio_request;
 		}
 	}
+
 
 #ifdef _GPIO_IIC_
 	if (gpio_is_valid(kth5701->i2csck_gpio)) {
@@ -536,20 +474,21 @@ static int kth5701_i2c_probe(struct i2c_client *i2c,
 
 	/*第二步：开启持续感应模式*/
 
-	KTH57XXContinuousSensing(0X0f);
+	//KTH57XXContinuousSensing(0X0f);
+	KTH57XXWakeupSleep(0X0f);
+	//KTH57XXSingleConversion(0x0f);
 
 	/* USER CODE END 2 */
-#if USE_KTH5701_THREAD
-	gp_Kth5701->thread = kthread_run(kth5701_sense_thread, NULL, "kth5701_thread");
-	if (IS_ERR(gp_Kth5701->thread)) {
-        pr_err("Failed to create kth5701 sense thread\n");
-        return PTR_ERR(gp_Kth5701->thread);
-    }
-#endif
 
     ret = device_create_file(&i2c->dev, &dev_attr_kthReg);
     if (ret) {
-        dev_err(&i2c->dev, "Failed to create sysfs file\n");
+        dev_err(&i2c->dev, "Failed to create sysfs kthReg node file\n");
+        goto free_class;
+    }
+
+	ret = device_create_file(&i2c->dev, &dev_attr_workmode);
+    if (ret) {
+        dev_err(&i2c->dev, "Failed to create sysfs workmode node file\n");
         goto free_class;
     }
 
@@ -578,14 +517,9 @@ static int kth5701_i2c_remove(struct i2c_client *i2c)
 
 	kth5701_power_onoff(kth5701, KTH5701_OFF);
 
-	device_remove_file(&i2c->dev, &dev_attr_kthReg);
+	device_remove_file(&i2c->dev, &dev_attr_workmode);
 
-#if 0
-    if (gp_Kth5701 && gp_Kth5701->thread) {
-        kthread_stop(gp_Kth5701->thread);
-        pr_info("kth5701_i2c_remove Thread stopped\n");
-    }
-#endif
+	device_remove_file(&i2c->dev, &dev_attr_kthReg);
 
 	if (gpio_is_valid(kth5701->enable_gpio))
 		devm_gpio_free(&i2c->dev, kth5701->enable_gpio);

@@ -33,12 +33,31 @@ struct kth5701 {
 	struct i2c_client *i2c;
 	struct device *dev;
 	int enable_gpio;
+	int hall_eint;
+	int hall_eint_gpio;
+	unsigned long halleint_swdebounce;
+	unsigned long halleint_hwdebounce;
+	struct delayed_work halleint_delaywork;
 	int i2csck_gpio;
 	int i2csda_gpio;
 	//struct task_struct *thread;
 };
 
 extern struct kth5701* gp_Kth5701;
+
+enum hall_state {
+	LOW_LEVEL,
+	HIG_LEVEL
+};
+
+typedef enum {
+	WAKEUP_SLEEP_MODE          = 0,
+	CONTINUOUS_SENSING_MODE,
+	SINGLE_CONVERSION_MODE,
+	IDLE_MODE,
+	RESET_MODE,
+	WORK_MODE_MAX
+} KTH5701_WORK_MODE;
 
 #ifdef _GPIO_IIC_
 void KTH5701_CLK_HIG(void);
